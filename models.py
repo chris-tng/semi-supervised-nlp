@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import copy
 
 from layers import ManifoldMixup
 
@@ -40,3 +41,19 @@ class GenericMixupModel(nn.Module):
         x_pooled = self.pooler(x_encoded)
         logits = self.cls_head(x_pooled)
         return logits
+
+
+class EMAModel:
+    
+    def __init__(self, model):
+        self.original = model
+        self.model = copy.deepcopy(model)
+    
+    def __call__(self, **kwargs):
+        return self.model(**kwargs)
+    
+    def update_parameters(self, alpha, global_step):
+        alpha = min(1 - 1/(global_step+1), alpha)
+        for ema_p, p in zip(self.model.parameters(), self.original.parameters()):
+            # ema * alpha + (1 - alpha) * p
+            ema_p.data.mul_(alpha).add_(1 - alpha, p.data)
