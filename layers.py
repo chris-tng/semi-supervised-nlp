@@ -8,10 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-# -
-
 from typing import Tuple
 
+
+# -
 
 # ### RNNDropout
 
@@ -309,6 +309,39 @@ class HANAttention(nn.Module):
         # cov: (batch_sz, n_head, n_head)
         cov = self.attn_w.transpose(2, 1).bmm(self.attn_w) - torch.eye(self.n_head, device=self.attn_w.device).unsqueeze(0)
         return (cov**2).sum(dim=[1, 2])
+
+
+# ### Mixup
+
+def pad_seq_len(x: Tensor, max_len: int):
+    "Pad seq len dimension by 0 - appending zero word vectors"
+    size = (x.size(0), max_len - x.size(1), x.size(2))
+    pad = x.new_zeros(*size)
+    return torch.cat([x, pad], dim=1)
+
+
+class ManifoldMixup(nn.Module):
+    """
+    Perform manifold mixup on `seq_len` dimension
+    """
+
+    def forward(self, x1: Tensor, x2: Tensor, m: float = 1.):
+        """
+        Args:
+        - x1: shape (batch_size, seq_len, feature_size)
+        - m: mixup factor
+        """
+        assert x1.ndim == x2.ndim == 3
+        # seq_lens might be different at this point
+        if x1.size(1) != x2.size(1):
+            max_seq_len = max(x1.size(1), x2.size(1))
+            if x1.size(1) < max_seq_len:
+                x1 = pad_seq_len(x1, max_seq_len)
+            else:
+                x2 = pad_seq_len(x2, max_seq_len)
+
+        x_mixup = m * x1 + (1 - m) * x2
+        return x_mixup
 
 
 
