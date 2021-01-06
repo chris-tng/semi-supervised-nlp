@@ -11,6 +11,17 @@ class Trainer:
 
 
 from models import EMAModel
+from metric import Collection, Loss
+from dataclasses import dataclass
+
+
+# ### Mean Teacher
+
+@dataclass
+class Metrics(Collection):
+    loss: Loss.from_output("loss")
+    sup_loss: Loss.from_output("sup_loss")
+    sup_cst_loss: Loss.from_output("sup_cst_loss")
 
 
 # +
@@ -20,24 +31,18 @@ from models import EMAModel
 
 class MeanTeacherTrainer(Trainer):
             
-    def train(self, n_epochs, model, train_dl, unlabeled_dl, loss_fn, consistency_loss_fn, optimizer, lr, **kwargs):
+    def train(self, n_epochs, model, train_dl, loss_fn, consistency_loss_fn, optimizer, lr, **kwargs):
         assert "cst_factor" in kwargs
         cst_factor = kwargs["cst_factor"]
         
-        optimizer = self.optimizer(self.model.parameters(), lr=lr)
+        optimizer = self.optimizer(model.parameters(), lr=lr)
         
+        metrics = None
         for epoch in range(n_epochs):
-            start = time.time()
-            train_loss = 0. ; train_acc = 0. ; train_sup_cst_loss = 0.
             model.train() ; ema_model.train()
-            train_it = iter(train_dl) ; unlabeled_it = iter(unlabeled_dl)
 
-            for i in range(n_train_iter):
-                global_step += 1
-                x, x_lens, xa, xa_lens, y = next(train_it)
+            for x, x_lens, xa, xa_lens, y in train_dl:
                 x, xa, y = x.cuda(), xa.cuda(), y.cuda()
-                x_un, x_un_lens, xa_un, xa_un_lens, _ = next(unlabeled_it)
-                x_un, xa_un = x_un.cuda(), xa_un.cuda()
 
                 # SUPERVISED LOSS
                 logits = model(x, x_lens)
@@ -46,25 +51,28 @@ class MeanTeacherTrainer(Trainer):
                 # CONSISTENCY LOSS
                 logits_aug = ema_model(xa, xa_lens).detach() # no backprop for teacher
                 
-                sup_cst_loss = cst_factor*consistency_loss_fn(logits, logits_aug, True).mean()
+                sup_cst_loss = cst_factor * consistency_loss_fn(logits, logits_aug, True).mean()
                 loss = sup_loss +  sup_cst_loss
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_value)
                 optimizer.step() ; optimizer.zero_grad()
                 ema_model.update_parameters(ema_decay, global_step)
 
+                update = Metrics.single_from_model_output(
+                    loss=loss, 
+                    sup_loss=sup_loss, 
+                    sup_cst_loss=sup_cst_loss
+                )
+                
                 with torch.no_grad():
-                    train_loss += loss.item()
-                    train_sup_cst_loss += sup_cst_loss.item()
-            msg.info(f"\t[{epoch}][{i}] Loss: {train_loss/(i + 1):.4f} - CST: {train_sup_cst_loss/(i+1):.4f}")
-
-            best_val1, patience = val_step(model, model_name, val_dl, best_val1, patience)
-            best_val2, _ = val_step(ema_model, "ema_mean_teacher", val_dl, best_val2, 0)
-            msg.info(f"\tElapsed: {time.time() - start:.4f}"); print();
-            if patience > max_patience: raise StopIteration()
+                    metrics = update if metrics is None else metrics.merge(update)
+                logger.info(f"\t[{epoch}][{i}] Loss: {metrics.compute()}")
 
 
-# +
+# -
+
+# ### UDA
+
 class UDATrainer(Trainer):
     
     def get_tsa_threshold(self, schedule, global_step, num_train_steps, start, end):
@@ -82,6 +90,8 @@ class UDATrainer(Trainer):
             
     
     def train(self, n_epochs, model, train_dl, unlabeled_dl, loss_fn, consistency_loss_fn, unsup_loss_fn, optimizer, lr, **kwargs):
+        optimizer = self.optimizer(model.parameters(), lr=lr)
+        
         for epoch in range(n_epochs):
             _sup_loss = 0. ; _unsup_loss = 0. 
             _sup_cst_loss = 0. ; _unsup_cst_loss = 0.
@@ -194,9 +204,7 @@ class UDATrainer(Trainer):
             train_unsup_ce_loss += [_unsup_ce_loss] ; train_unsup_ce_loss_au += [_unsup_ce_loss_au]
             train_n_sup += [_n_sup] ; train_n_unsup += [_n_unsup]
             if patience > max_patience: raise StopIteration()
-    
-    
-# -
+
 
 class MixMatchTrainer(Trainer):
     
